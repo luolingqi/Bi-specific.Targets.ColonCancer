@@ -1,5 +1,9 @@
 ---
 title: "Expression Histogram for a SELECTED gene pair among sample types"
+author: "Lingqi Luo"
+date: "`r format(Sys.time(), '%d %B, %Y, %H:%M')`"
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = "results") })
 output:
   html_document:
     df_print: paged
@@ -15,17 +19,17 @@ knitr::opts_chunk$set(echo = TRUE, error = FALSE, message = FALSE, warning = FAL
 ```{r include=FALSE, echo=FALSE}
 library(Biobase)
 library(GEOquery)
-library(limma)
+#library(limma)
 library(dplyr)
-library(affycoretools)
-library(rgl)
+#library(affycoretools)
+#library(rgl)
 library(RColorBrewer)
 library(ggplot2)
 library(ggpubr)
-library(tidyverse)
-library(caret)
-library("verification")
-library(broom)
+#library(tidyverse)
+#library(caret)
+#library("verification")
+#library(broom)
 library(reshape2)
 ```
 We found that the positivity rate **diverges the most** between Colon normal tissue and Primary/Metastatic cancer tissue, using **10TPM** as the cutoff (as shown below). This shiny notebook plots the expression value (TPM in log2 scale) distribution for visualization purpose.
