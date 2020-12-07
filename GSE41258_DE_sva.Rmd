@@ -1,0 +1,271 @@
+---
+title: "Untitled"
+author: "Lingqi Luo"
+date: "6/22/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+# Version info: R 3.2.3, Biobase 2.30.0, GEOquery 2.40.0, limma 3.26.8
+# R scripts generated  Mon Jun 8 13:56:10 EDT 2020
+
+################################################################
+#   Differential expression analysis with limma
+library(Biobase)
+library(GEOquery)
+library(limma)
+
+# load series and platform data from GEO
+
+gset <- getGEO("GSE41258", GSEMatrix =TRUE, AnnotGPL=FALSE)
+if (length(gset) > 1) idx <- grep("GPL96", attr(gset, "names")) else idx <- 1
+gset <- gset[[idx]]
+
+# make proper column names to match toptable 
+fvarLabels(gset) <- make.names(fvarLabels(gset))
+
+#write.table(pData(gset),file = "GSE41258_pData.txt" , quote = FALSE, sep = "\t")
+
+# group names for all samples
+gsms_metastasis.lung <- "XXXXXXXXXXXXXXXXXXXXX1XX1X0X0XXXXXXXX0XX0XX1XXXXX0XX0XX0X0X0XX0X01X0X0X1X0XXX0X0X0XXXXXXXXX0XX1XXXX1XX0XX1XXXXXX1XXXXXXXXXXXXX1XXXXXXXXXXXXXXXXXXXX1XXXX11X1XX1X1XXXXX1XXX111XXXXXXXX0XXXXX00XXXXXXXXXXXXXXXX0XXX0XXXXXXXXXX0XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX0XXX0XX0XX0XXXXXXX0X0XXX0XXXXXXXX0XXXX0XXXX0X0XXXXX0XXX0XXXX0X0X0XXXXXXXX0XX0XXXXX0XXXXXXXX0XXX0XX0X0XXXXX0XXX0XXXXX0X0XXX00XXXXXXXXXXXXXX"
+
+gsms_metastasis.liver <- "X1111111X1111111XX1XXXXXXX0X0XXXXXXXX0XX0XXXXXXXX0XX0XX0X0X0XX0X0XX0X0XXX0XXX0X0X0XXXXXXXXX0XXXXXXXXXX0XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX1XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX11XXX1X01XXXX00XXX1X1XX11XXX1XX011X0XXXXXXXXXX0XX1XXXX1XXXXXXXXXXX1X11111XXXXX0XXX0XX0XX0XXXXXXX0X0X1X0XX1X11XX0XX1X0XXXX0X0XXXXX0XXX0XXXX0X0X0XXXXXXXX0XX0XXX1X0X1XXXXXX0XXX0XX0X0XX1XX0X1X0X1XXX0X0X1X00X1XXXXXXXXXXXX"
+
+gsms_primary <- "XXXXXXXX1XXXXXXXXXX1XXXXX101011X1X1X1011011X1X11101X01X0101011010X1010XX101X101010X1X11X111011X1111XX101XX1111X1X111X1111111XXX1X11111111X1XX1X1X11X1111XX1X1XX1X1111XX111XXX1XXX11XX0X111X00111X1XX1XXX11XXX0XX10111X1X11XX011X1XXXX1X111X1XXXXXXXXXXX11111011101101101111X11010XX10XXX1XX11011X101111010111110X110111101010111XX1X10110XXXX10XX11111101X10X10101XX110XX10XX1X1010XX100XXXXXXXXXXXXXX"
+#gsms <- "X1X1X1X1X1XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX00000"
+sml <- c()
+for (i in 1:nchar(gsms_primary)) { sml[i] <- substr(gsms_primary,i,i) }
+
+# eliminate samples marked as "X"
+sel <- which(sml != "X")
+sml <- sml[sel]
+gset <- gset[ ,sel]
+  
+
+# log2 transform
+ex <- exprs(gset)
+qx <- as.numeric(quantile(ex, c(0., 0.25, 0.5, 0.75, 0.99, 1.0), na.rm=T))
+LogC <- (qx[5] > 100) ||
+          (qx[6]-qx[1] > 50 && qx[2] > 0) ||
+          (qx[2] > 0 && qx[2] < 1 && qx[4] > 1 && qx[4] < 2)
+
+if (LogC) { ex[which(ex <= 0)] <- NaN
+  exprs(gset) <- log2(ex) }
+
+# Detect and remove any hidden batch effect in samples using sva package
+library(sva)
+library(pamr)
+pheno = pData(gset)[,!names(pData(gset)) %in% c("characteristics_ch1")]
+
+mod = model.matrix(~as.factor(pheno$"tissue:ch1"), data = pheno)
+mod0 = model.matrix(~1, data = pheno)
+
+edata <- exprs(gset)
+n.sv = num.sv(edata, mod, method = "leek")
+n.sv
+
+svobj = sva(edata, mod, mod0, n.sv = n.sv)
+
+# calculate the F-test p-values for differential expression with respect to cancer status, without adjusting for surrogate variables, adjust them for multiple testing
+
+pValues = f.pvalue(edata, mod, mod0)
+qValues = p.adjust(pValues, method = "BH")
+
+# perform the same analysis, adjusting for surrogate variables
+modSv = cbind(mod,svobj$sv)
+mod0Sv = cbind(mod0,svobj$sv)
+pValuesSv = f.pvalue(edata,modSv,mod0Sv)
+qValuesSv = p.adjust(pValuesSv,method="BH")
+
+# set up the data and proceed with analysis
+# sml <- paste("G", sml, sep="")    # set group names
+# fl <- as.factor(sml)
+# gset$description <- fl
+# design <- model.matrix(~ description + 0, gset)
+# colnames(design) <- levels(fl)
+
+fit <- lmFit(gset, modSv)
+cont.matrix <- makeContrasts(G1-G0, levels=design)
+fit2 <- contrasts.fit(fit, cont.matrix)
+fit2 <- eBayes(fit2, 0.01)
+tT <- topTable(fit2, adjust="fdr", sort.by="logFC", number=500)
+
+tT <- subset(tT, select=c("ID","adj.P.Val","P.Value","t","B","AveExpr","logFC","Gene.Symbol","ENTREZ_GENE_ID","Gene.Title"))
+write.table(tT, file=file.path(getwd(),"primary_vs_normal_df_gene.txt"), row.names=F, sep="\t")
+
+# Draw heatmap for the most significantly expressed genes
+library("RColorBrewer")
+library("gplots")
+library("pheatmap")
+
+hmcol <- colorRampPalette(brewer.pal(9, "GnBu"))(100)
+largeur=25
+hauteur=15
+
+# prepare expression data for all the significantly OVER-expressed genes with adj.P.Val < 0.1ex
+sig.Overexpressed.genes <- tT[tT$logFC>0 & tT$adj.P.Val<0.1,]$ID
+df_qVal_lt0.1 <- exprs(gset)[rownames(exprs(gset)) %in% sig.Overexpressed.genes,]
+rownames(df_qVal_lt0.1) <- tT[tT$logFC>0 & tT$adj.P.Val<0.1,]$SPOT_ID
+
+#rownames(df_qVal_lt0.1) <- tT[tT$logFC>0 & tT$adj.P.Val<0.1,]$SPOT_ID
+# heatmap.2                                       
+heatmap.2(df_qVal_lt0.1, col = hmcol,
+Rowv = FALSE, Colv = TRUE, scale="none",
+dendrogram="both", trace="none",
+cexRow = 0.5, cexCol = 0.7, srtCol = 90, adjCol = c(1,1))
+
+#pheatmap
+cal_z_score <- function(x){
+  (x - mean(x)) / sd(x)
+}
+ 
+df_qVal_lt0.1_norm <- t(apply(df_qVal_lt0.1, 1, cal_z_score))
+groupLabel <- gsub("G1","Tumor",sml)
+groupLabel <- gsub("G0","Normal",groupLabel)
+
+my_sample_col <- data.frame(sample = groupLabel)
+row.names(my_sample_col) <- colnames(df_qVal_lt0.1_norm)
+
+pheatmap(df_qVal_lt0.1_norm,
+         annotation_col = my_sample_col,
+         cutree_cols = 2,
+         fontsize_row = 5,
+         cluster_rows = FALSE)
+
+# Draw enhanced volcano plot for the most significantly expressed genes
+library(EnhancedVolcano)
+#res_subset1 <- res[is.finite(res$log2FoldChange),]
+#row.names(res_subset1) <- res_subset1$symbol
+EnhancedVolcano(tT, lab = tT$Gene.Symbol, x = "logFC", y = "adj.P.Val",
+                xlab = bquote(~Log[2]~ "fold change"),
+                ylab = bquote(~-Log[10]~adjusted~italic(P)),
+                pCutoff = 0.1, FCcutoff = 0.25, 
+                transcriptPointSize = 1.5, transcriptLabSize = 3.0,
+                title = "Tumor versus Normal", legend=c("NS","Log2 FC","Adjusted p-value",
+                "Adjusted p-value & Log2 FC"), legendPosition = "bottom",legendLabSize = 10,
+                legendIconSize = 5.0)
+
+# Draw sample to sample distance
+#We calculate sample to sample distances so we can make a dendrogram to look at the clustering of samples.
+#distsRL <- dist(t(assay(rld)))
+distsRL <- dist(t(exprs(gset)))
+mat <- as.matrix(distsRL)
+rownames(mat) <- colnames(mat) #<- with(colData(dds),paste(condition,sampleFiles , sep=" : "))
+hc <- hclust(distsRL)
+
+heatmap.2(mat, Rowv=as.dendrogram(hc),
+symm=TRUE, trace="none",
+col = rev(hmcol),
+cexRow = 0.7, cexCol = 0.7, srtCol = 90, srtRow = 0, 
+adjCol = c(1,1), adjRow = c(0,NA), margin = c(6,10))
+
+# sample distance correlation by pheatmap
+sample_df <- as.data.frame(mat)
+row.names(my_sample_col) <- colnames(sample_df)
+
+#hmcol <- colorRampPalette(brewer.pal(9, "GnBu"))(100)
+pheatmap(sample_df,
+         color = rev(hmcol),
+         annotation_col = my_sample_col,
+         annotation_row = my_sample_col,
+         fontsize_row = 5,
+         fontsize_col = 5)
+
+# Plot PCA
+# PCA plot
+
+library(affycoretools)
+library(rgl)
+library(RColorBrewer)
+qual_col_pals = brewer.pal.info[brewer.pal.info$category == 'qual',]
+col_vector = unlist(mapply(brewer.pal, qual_col_pals$maxcolors, rownames(qual_col_pals)))
+
+draw_PCA_Group <- function (x,group) {
+  # subset the gset
+  data <- x[rowSums(is.na(exprs(x))) == 0, !is.na(pData(x)[,group])]
+  items <- as.factor(pData(x)[,group][!is.na(pData(x)[,group])])
+  n <- length(levels(items))
+  p <- plotPCA(data,
+          main = paste("Principal Components for", group),
+          groups = as.numeric(items),
+          groupnames = levels(items),
+          pch = rep(16,n),
+          col = sample(col_vector,n),
+          outside = TRUE
+          )
+ return(p)
+}
+
+group = "description"
+p <- draw_PCA_Group(gset, group)
+print(p)
+
+group = "characteristics_ch1.7"
+p <- draw_PCA_Group(gset, group)
+print(p)
+
+group = "group stage:ch1"
+p <- draw_PCA_Group(gset, group)
+print(p)
+
+group = "anatomic location:ch1"
+p <- draw_PCA_Group(gset, group)
+print(p)
+
+group = "microsattelite instability:ch1"
+p <- draw_PCA_Group(gset, group)
+print(p)
+
+
+#####################################################
+## Plot a customized list of genes
+#####################################################
+# list1: CDH3, col11A1, INHBA, SFTPC, CD98, GLUT-1, CD73
+genes_list <- c("CDH3", "COL11A1", "INHBA", "SFTPC", "SLC3A2", "SLC7A5", "TFRC", "SLC2A1")
+fData(gset)[fData(gset)$Gene.Symbol %in% genes_list,]$ID #[,c("ID","Gene.Symbol")]
+
+df_genes_list <- exprs(gset)[fData(gset)$Gene.Symbol %in% genes_list,]
+# average out all the probe sets in one genes and pad with zeros for not expressed genes
+probe_IDs <- row.names(df_genes_list)
+
+rownames(df_genes_list) <- fData(gset)[fData(gset)$Gene.Symbol %in% genes_list,]$Gene.Symbol
+
+df_genes_list_norm <- t(apply(df_genes_list, 1, cal_z_score))
+groupLabel <- gsub("G1","Tumor",sml)
+groupLabel <- gsub("G0","Normal",groupLabel)
+
+my_sample_col <- data.frame(sample = groupLabel)
+row.names(my_sample_col) <- colnames(df_genes_list_norm)
+
+my_gene_row <- data.frame(gene = rownames(df_genes_list_norm))
+row.names(df_genes_list_norm) <- probe_IDs
+row.names(my_gene_row) <- probe_IDs
+
+# Heatmap of Z-score normalized expression
+pheatmap(df_genes_list_norm[order(my_gene_row),order(my_sample_col)],
+         annotation_col = my_sample_col,
+         annotation_row = my_gene_row,
+         fontsize_row = 1,
+         fontsize_col = 1,
+         cluster_rows = FALSE,
+         cluster_cols = FALSE)
+
+
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

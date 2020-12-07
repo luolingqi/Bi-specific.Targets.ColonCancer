@@ -1,0 +1,90 @@
+---
+title: "R Notebook"
+output: html_document
+---
+
+This is a Notebook exploring transcription profile of a given set of gene pairs in the project TCGA-STAD. 
+
+Gene reads are normalized using DESeq2 scaling factor before plotting for 1) expression profiling between conditions; 2) expression correlation between the pair of genes
+```{r error=FALSE, message=FALSE, echo=FALSE}
+library(TCGAbiolinks)
+library(SummarizedExperiment)
+library(DT)
+library(ggpubr)
+library(magrittr)
+library(DESeq2)
+```
+
+1. Download the Project oriented Expression Data from TCGA
+```{r include=FALSE, cache=TRUE, echo=TRUE}
+query <- GDCquery(project = "TCGA-STAD",
+                  data.category = "Transcriptome Profiling",
+                  data.type = "Gene Expression Quantification",
+                  workflow.type = "HTSeq - Counts")
+
+GDCdownload(query)
+exp.STAD <- GDCprepare(query,
+                       save = T,
+                       save.filename = "exp.STAD.rda")
+
+
+```
+
+2. Estimate and apply scaling factor normalization (DESeq2)
+```{r error=FALSE, warning=FALSE, echo=TRUE}
+#datatable(as.data.frame(colData(exp.STAD)), 
+#              options = list(scrollX = TRUE, keys = TRUE, pageLength = 5), 
+#              rownames = FALSE)
+path <- "/Users/luol2/Dropbox/MSK/Projects/Guillem_Project/Colon_Cancer/GSE41258_DE"
+genes <- c("CDH11","CDH3","DPEP1","LGR5","MET","MMP14","NOTCH3","RNF43","SLC7A5","SLCO4A1")
+
+# apply DeSeq2 normalization
+exp.STAD$sample_type <- factor(exp.STAD$sample_type, level=c("Solid Tissue Normal","Primary Tumor"))
+#exp.STAD$sample_type <- as.factor(exp.STAD$sample_type)
+#levels(exp.STAD$sample_type) <- c("Primary Tumor","Solid Tissue Normal")
+
+#exp.STAD$sample_type %<>% relevel("Solid Tissue Normal")
+
+dds <- DESeqDataSet(exp.STAD, design = ~ sample_type)
+
+# prefiltering
+keep <- rowSums(counts(dds)) > 1
+dds <- dds[keep,]
+dds <- estimateSizeFactors(dds)
+
+# subset the normalized count to the genes only
+# Apply normalization
+normalized_counts <- counts(dds[rowData(dds)$external_gene_name %in% genes,], normalized=TRUE)
+normalized_counts <- as.data.frame(normalized_counts)
+row.names(normalized_counts) <- genes
+```
+
+3. Plot for differential expression and correlation for gene pairs
+```{r error=FALSE, warning=FALSE, echo=TRUE}
+df_pairs <- read.table(file = file.path(path,"gene_pairs_for_exp.txt"), header = F, sep = "\t", quote = "", stringsAsFactors = F)
+groupLabel <- exp.STAD$sample_type
+
+for (i in 1:nrow(df_pairs)) {
+  gene1 = df_pairs[i,1]
+  gene2 = df_pairs[i,2]
+  x=as.character(df_pairs[i,])
+  #x=unname(unlist(df_pairs[i,]))
+  #x=df_pairs[i,]
+  mat <- log2(normalized_counts[row.names(normalized_counts) %in% x,]+1)
+  
+  mat <- t(mat)
+  mat <- cbind(as.data.frame(mat),sample = groupLabel)
+  
+  p <- ggscatter(mat, x = gene1, y = gene2,
+          color = "sample", size = 0.5, palette = c("#00AFBB", "#FC4E07"), add = "reg.line", conf.int = TRUE,
+          xlab = paste0("log2(Expression of ",gene1, " )"), ylab = paste0("log2(Expression of ",gene2, " )")) +
+  stat_cor(aes(color = sample), method = "pearson") +
+    ggtitle(label = paste0("Coexpression in ",type," stomach cancer samples \n( ", gene1, "_vs_", gene2," )"))
+
+  print(p)
+}
+
+```
+
+
+

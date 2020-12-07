@@ -1,0 +1,879 @@
+---
+title: "Untitled"
+author: "Lingqi Luo"
+date: "6/22/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+# Version info: R 3.2.3, Biobase 2.30.0, GEOquery 2.40.0, limma 3.26.8
+# R scripts generated  Mon Jun 8 13:56:10 EDT 2020
+
+################################################################
+#   Differential expression analysis with limma
+library(Biobase)
+library(GEOquery)
+library(limma)
+library(dplyr)
+library(affycoretools)
+library(rgl)
+library(RColorBrewer)
+library(ggplot2)
+library(ggpubr)
+library(tidyverse)
+library(caret)
+library("verification")
+library(broom)
+
+
+# Define the condition
+
+types = c("primary", "metastasis.liver", "metastasis.lung")
+idx = 1
+type = types[idx]
+#type = "metastasis.liver"
+#type = "metastasis.lung"
+
+
+# load series and platform data from GEO
+gset <- getGEO("GSE41258", GSEMatrix =TRUE, AnnotGPL=FALSE)
+if (length(gset) > 1) idx <- grep("GPL96", attr(gset, "names")) else idx <- 1
+gset <- gset[[idx]]
+
+# make proper column names to match toptable 
+fvarLabels(gset) <- make.names(fvarLabels(gset))
+
+#write.table(pData(gset),file = "GSE41258_pData.txt" , quote = FALSE, sep = "\t")
+#idx = 1
+#type = types[idx]
+# group names for all samples
+gsms_metastasis.lung <- "XXXXXXXXXXXXXXXXXXXXX1XX1X0X0XXXXXXXX0XX0XX1XXXXX0XX0XX0X0X0XX0X01X0X0X1X0XXX0X0X0XXXXXXXXX0XX1XXXX1XX0XX1XXXXXX1XXXXXXXXXXXXX1XXXXXXXXXXXXXXXXXXXX1XXXX11X1XX1X1XXXXX1XXX111XXXXXXXX0XXXXX00XXXXXXXXXXXXXXXX0XXX0XXXXXXXXXX0XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX0XXX0XX0XX0XXXXXXX0X0XXX0XXXXXXXX0XXXX0XXXX0X0XXXXX0XXX0XXXX0X0X0XXXXXXXX0XX0XXXXX0XXXXXXXX0XXX0XX0X0XXXXX0XXX0XXXXX0X0XXX00XXXXXXXXXXXXXX"
+
+gsms_metastasis.liver <- "X1111111X1111111XX1XXXXXXX0X0XXXXXXXX0XX0XXXXXXXX0XX0XX0X0X0XX0X0XX0X0XXX0XXX0X0X0XXXXXXXXX0XXXXXXXXXX0XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX1XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX11XXX1X01XXXX00XXX1X1XX11XXX1XX011X0XXXXXXXXXX0XX1XXXX1XXXXXXXXXXX1X11111XXXXX0XXX0XX0XX0XXXXXXX0X0X1X0XX1X11XX0XX1X0XXXX0X0XXXXX0XXX0XXXX0X0X0XXXXXXXX0XX0XXX1X0X1XXXXXX0XXX0XX0X0XX1XX0X1X0X1XXX0X0X1X00X1XXXXXXXXXXXX"
+
+gsms_primary <- "XXXXXXXX1XXXXXXXXXX1XXXXX101011X1X1X1011011X1X11101X01X0101011010X1010XX101X101010X1X11X111011X1111XX101XX1111X1X111X1111111XXX1X11111111X1XX1X1X11X1111XX1X1XX1X1111XX111XXX1XXX11XX0X111X00111X1XX1XXX11XXX0XX10111X1X11XX011X1XXXX1X111X1XXXXXXXXXXX11111011101101101111X11010XX10XXX1XX11011X101111010111110X110111101010111XX1X10110XXXX10XX11111101X10X10101XX110XX10XX1X1010XX100XXXXXXXXXXXXXX"
+#gsms <- "X1X1X1X1X1XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX00000"
+sml <- c()
+for (i in 1:nchar(get(paste0("gsms_",type)))) { sml[i] <- substr(get(paste0("gsms_",type)),i,i) }
+
+# eliminate samples marked as "X"
+sel <- which(sml != "X")
+sml <- sml[sel]
+gset <- gset[ ,sel]
+  
+# ################################################################
+# #   Boxplot for selected GEO samples
+# # order samples by group
+# ex <- exprs(gset)[ , order(sml)]
+# sml <- sml[order(sml)]
+# fl <- as.factor(sml)
+# labels <- c("Control","tumor")
+# 
+# # set parameters and draw the plot
+# palette(c("#f4dfdf","#dfeaf4", "#AABBCC"))
+# dev.new(width=4+dim(gset)[[2]]/5, height=6)
+# par(mar=c(2+round(max(nchar(sampleNames(gset)))/2),4,2,1))
+# title <- paste ("GSE41258", '/', annotation(gset), " selected samples", sep ='')
+# boxplot(ex, boxwex=0.6, notch=T, main=title, outline=FALSE, las=2, col=fl)
+# legend("topleft", labels, fill=palette(), bty="n")
+# dev.off()
+# #####################################################################
+
+# log2 transform
+ex <- exprs(gset)
+qx <- as.numeric(quantile(ex, c(0., 0.25, 0.5, 0.75, 0.99, 1.0), na.rm=T))
+LogC <- (qx[5] > 100) ||
+          (qx[6]-qx[1] > 50 && qx[2] > 0) ||
+          (qx[2] > 0 && qx[2] < 1 && qx[4] > 1 && qx[4] < 2)
+
+if (LogC) { ex[which(ex <= 0)] <- NaN
+  exprs(gset) <- log2(ex) }
+
+# Detect and remove any hidden batch effect in samples using sva package
+library(sva)
+library(pamr)
+pheno = pData(gset)[,!names(pData(gset)) %in% c("characteristics_ch1")]
+
+mod = model.matrix(~as.factor(pheno$"tissue:ch1"), data = pheno)
+mod0 = model.matrix(~1, data = pheno)
+
+n.sv = num.sv(exprs(gset), mod, method = "leek")
+n.sv
+
+svobj = sva(exprs(gset), mod, mod0, n.sv = n.sv)
+
+# calculate the F-test p-values for differential expression with respect to cancer status, without adjusting for surrogate variables, adjust them for multiple testing
+
+pValues = f.pvalue(exprs(gset), mod, mod0)
+qValues = p.adjust(pValues, method = "BH")
+
+# perform the same analysis, adjusting for surrogate variables
+modSv = cbind(mod,svobj$sv)
+mod0Sv = cbind(mod0,svobj$sv)
+pValuesSv = f.pvalue(exprs(gset),modSv,mod0Sv)
+qValuesSv = p.adjust(pValuesSv,method="BH")
+
+# set up the data and proceed with analysis
+sml <- paste("G", sml, sep="")    # set group names
+fl <- as.factor(sml)
+gset$description <- fl
+design <- model.matrix(~ description + 0, gset)
+colnames(design) <- levels(fl)
+fit <- lmFit(gset, design)
+cont.matrix <- makeContrasts(G1-G0, levels=design)
+fit2 <- contrasts.fit(fit, cont.matrix)
+fit2 <- eBayes(fit2, 0.01)
+tT <- topTable(fit2, adjust="fdr", sort.by="logFC", number=500)
+orig_tT <- topTable(fit2, adjust="fdr", sort.by="logFC", number=Inf)
+
+tT <- subset(tT, select=c("ID","adj.P.Val","P.Value","t","B","AveExpr","logFC","Gene.Symbol","ENTREZ_GENE_ID","Gene.Title"))
+orig_tT <- subset(orig_tT, select=c("ID","adj.P.Val","P.Value","t","B","AveExpr","logFC","Gene.Symbol","ENTREZ_GENE_ID","Gene.Title"))
+
+# subset for query genes
+query_genes <- c("RNF43","LGR5","PTK7","LRP8","SLC2A3","SLC7A5","SLC7A11","SLC6A6","SLCO4A1","SLC34A2","SLC2A2","SLCO1B3","CDH3","CDH11","CLDN1","CELSR3","ADAM8","ADAM12","MMP14","GRM7","GRM8","GABBR1","MARCO","FCGR1B","CD47","PRR7","MET","NOTCH3","EFNA3","TACSTD2","EDNRA","LY6G6D//LY6G6F","NOX4","DPEP1","TMEM132A","TMEM158","TDGF1","MSLN","THY","FAP","ATP9A","GABRE","GDPD5")
+query_tT <- orig_tT[orig_tT$Gene.Symbol %in% query_genes,c("Gene.Symbol","AveExpr","logFC")]
+query_tT <- query_tT[order(query_tT$Gene.Symbol),]
+query_tT_median <- as.data.frame(query_tT %>% group_by(Gene.Symbol) %>% summarise_all(list(~median(.))))
+
+write.table(tT, file=file.path(getwd(),paste0(type,"_vs_normal_df_gene.txt")), row.names=F, sep="\t")
+
+# Draw heatmap for the most significantly expressed genes
+library("RColorBrewer")
+library("gplots")
+library("pheatmap")
+
+hmcol <- colorRampPalette(brewer.pal(9, "GnBu"))(100)
+largeur=25
+hauteur=15
+
+# prepare expression data for all the significantly OVER-expressed genes with adj.P.Val < 0.1ex
+sig.Overexpressed.genes <- tT[tT$logFC>0 & tT$adj.P.Val<0.1,]$ID
+df_qVal_lt0.1 <- exprs(gset)[rownames(exprs(gset)) %in% sig.Overexpressed.genes,]
+rownames(df_qVal_lt0.1) <- tT[tT$logFC>0 & tT$adj.P.Val<0.1,]$ID
+
+#rownames(df_qVal_lt0.1) <- tT[tT$logFC>0 & tT$adj.P.Val<0.1,]$SPOT_ID
+# heatmap.2                                       
+# heatmap.2(df_qVal_lt0.1, col = hmcol,
+# Rowv = FALSE, Colv = TRUE, scale="none",
+# dendrogram="both", trace="none",
+# cexRow = 0.5, cexCol = 0.7, srtCol = 90, adjCol = c(1,1))
+
+#pheatmap
+cal_z_score <- function(x){
+  (x - mean(x)) / sd(x)
+}
+ 
+df_qVal_lt0.1_norm <- t(apply(df_qVal_lt0.1, 1, cal_z_score))
+groupLabel <- gsub("G1","Tumor",sml)
+groupLabel <- gsub("G0","Normal",groupLabel)
+
+my_sample_col <- data.frame(sample = groupLabel)
+row.names(my_sample_col) <- colnames(df_qVal_lt0.1_norm)
+
+pheatmap(df_qVal_lt0.1_norm,
+         annotation_col = my_sample_col,
+         cutree_cols = 2,
+         fontsize_row = 5,
+         cluster_rows = FALSE)
+
+# Draw enhanced volcano plot for the most significantly expressed genes
+library(EnhancedVolcano)
+#res_subset1 <- res[is.finite(res$log2FoldChange),]
+#row.names(res_subset1) <- res_subset1$symbol
+EnhancedVolcano(tT, lab = tT$Gene.Symbol, x = "logFC", y = "adj.P.Val",
+                xlab = bquote(~Log[2]~ "fold change"),
+                ylab = bquote(~-Log[10]~adjusted~italic(P)),
+                pCutoff = 0.1, FCcutoff = 0.25, 
+                title = "Tumor versus Normal", legend=c("NS","Log2 FC","Adjusted p-value",
+                "Adjusted p-value & Log2 FC"), legendPosition = "bottom",legendLabSize = 10,
+                legendIconSize = 5.0)
+
+
+#### Spearman correlation matrix to check any coexpression pattern out of the top positive differentially overexpressed genes
+
+# rcorr to test correlation
+library("Hmisc")
+
+# collapse matrix by gene (median exp value of same gene)
+mat1 <- as.data.frame(df_qVal_lt0.1_norm)
+mat1$row.names <- tT[tT$logFC>0 & tT$adj.P.Val<0.1,]$Gene.Symbol
+    
+df_qVal_lt0.1_norm_by_gene <- as.data.frame(mat1 %>% group_by(row.names) %>% summarise_all(list(~median(.))))
+row.names(df_qVal_lt0.1_norm_by_gene) <- df_qVal_lt0.1_norm_by_gene$row.names
+df_qVal_lt0.1_norm_by_gene <- df_qVal_lt0.1_norm_by_gene[,-which(names(df_qVal_lt0.1_norm_by_gene) %in% c("row.names"))]
+  
+res <- rcorr(t(df_qVal_lt0.1_norm_by_gene))
+#res$r
+#res$P
+# ++++++++++++++++++++++++++++
+# flattenCorrMatrix
+# ++++++++++++++++++++++++++++
+# cormat : matrix of the correlation coefficients
+# pmat : matrix of the correlation p-values
+flattenCorrMatrix <- function(cormat, pmat) {
+  ut <- upper.tri(cormat)
+  data.frame(
+    row = rownames(cormat)[row(cormat)[ut]],
+    column = rownames(cormat)[col(cormat)[ut]],
+    distance  = 1- (cormat)[ut],
+    p = pmat[ut]
+    )
+}
+
+flattenCorrMatrix(res$r, res$P)
+write.table(flattenCorrMatrix(res$r, res$P), file=file.path(getwd(),paste0(type,"_vs_normal_gene_corrmtx.txt")), row.names=F, sep="\t", quote = FALSE)
+
+# Perform hierarchical clustering ,using 1-correlation as distance
+#1. Convert correlation dataframe into dissimilarity object
+df_tmp <- 1-res$r[-1,-1]
+
+temp = as.vector(na.omit(unlist(df_tmp)))
+NM = unique(c(colnames(df_tmp), row.names(df_tmp)))
+mydist = structure(temp, Size = length(NM), Labels = NM,
+                   Diag = FALSE, Upper = FALSE, method = "euclidean", #Optional
+                   class = "dist")
+# Hierarchical clustering using Complete Linkage
+
+hc <- hclust(mydist, method = "complete")
+
+sub_grp <- cutree(hc, k = 5)
+table(sub_grp)
+
+
+# Plot the dendrogram
+plot(hc, cex = 0.4, hang = -1)
+rect.hclust(hc, k = 5, border = 2:6)
+
+# write clusters of genes into file
+write.table(list(sub_grp), file = file.path(getwd(),paste0(type,"_vs_normal_corr_gene_clusters.txt")), quote = FALSE, sep = "\t")
+
+# Plot the correlation matrix with clustering
+library(corrplot)
+corr_plot <- corrplot(res$r, type = "upper", order = "hclust", tl.cex = 0.2,
+         p.mat = res$P, sig.level = 0.05, insig = "blank")
+corr_plot
+
+# heatmap
+col<- colorRampPalette(c("blue", "white", "red"))(20)
+corr_hm <- heatmap(x = res$r, col = col, symm = TRUE, cexRow = 0.2, cexCol = 0.2)
+corr_hm
+# Plot some individual correlation using scatter plot with test # FABP6
+
+gene_lists <- list(primary=c("CDH11","IGF2BP3","FKBP10"), 
+                   metastasis.liver=c("COL1A1","SOX9","VEGFA"), 
+                   metastasis.lung=c("SOX4","SFTPB","THY1")) # primary, liver.met lung.met
+
+gene_list <- gene_lists[[type]]
+
+library("ggpubr")
+df_scatter <- cbind(as.data.frame(t(df_qVal_lt0.1_norm_by_gene)),sample = groupLabel)
+ggscatter(df_scatter, x = gene_list[1], y = gene_list[2],
+          color = "sample", palette = c("#00AFBB", "#FC4E07"), add = "reg.line", conf.int = TRUE, 
+          cor.coef = TRUE, cor.method = "spearman",
+          xlab = paste0("Expression of ",gene_list[1]), ylab = paste0("Expression of ",gene_list[2]))
+
+ggscatter(df_scatter, x = gene_list[1], y = gene_list[3],
+          color = "sample", palette = c("#00AFBB", "#FC4E07"), add = "reg.line", conf.int = TRUE, 
+          cor.coef = TRUE, cor.method = "spearman",
+          xlab = paste0("Expression of ",gene_list[1]), ylab = paste0("Expression of ",gene_list[3]))
+
+ggscatter(df_scatter, x = gene_list[2], y = gene_list[3],
+          color = "sample", palette = c("#00AFBB", "#FC4E07"), add = "reg.line", conf.int = TRUE, 
+          cor.coef = TRUE, cor.method = "spearman",
+          xlab = paste0("Expression of ",gene_list[2]), ylab = paste0("Expression of ",gene_list[3]))
+
+##############################################
+# plot specifically for RNF43 vs SLC7A5
+##############################################
+ggscatter(df_scatter, x = "RNF43", y = "SLC7A5",
+          color = "sample", palette = c("#00AFBB", "#FC4E07"), add = "reg.line", conf.int = TRUE, 
+          cor.coef = TRUE, cor.method = "spearman",
+          xlab = paste0("Expression of ","RNF43"), ylab = paste0("Expression of ","SLC7A5"))
+
+library("scatterplot3d")
+angles <- c(15,35,55,75,95)
+for(angle in angles){
+  colors <- c("#999999", "#E69F00", "#56B4E9")
+  colors <- colors[as.numeric(as.factor(groupLabel))]
+  scatterplot3d(cbind(as.data.frame(t(df_qVal_lt0.1_norm_by_gene)),sample = groupLabel)[,gene_list], pch = 16, color = colors, type = "h",
+              grid=TRUE, angle = angle)
+}
+
+
+###########################################################################################################
+##Qulaity measurements
+##########################################################################################################
+# Draw sample to sample distance
+#We calculate sample to sample distances so we can make a dendrogram to look at the clustering of samples.
+#distsRL <- dist(t(assay(rld)))
+distsRL <- dist(t(exprs(gset)))
+mat <- as.matrix(distsRL)
+rownames(mat) <- colnames(mat) #<- with(colData(dds),paste(condition,sampleFiles , sep=" : "))
+# hc <- hclust(distsRL)
+# 
+# heatmap.2(mat, Rowv=as.dendrogram(hc),
+# symm=TRUE, trace="none",
+# col = rev(hmcol),
+# cexRow = 0.7, cexCol = 0.7, srtCol = 90, srtRow = 0, 
+# adjCol = c(1,1), adjRow = c(0,NA), margin = c(6,10))
+
+# sample distance correlation by pheatmap
+sample_df <- as.data.frame(mat)
+row.names(my_sample_col) <- colnames(sample_df)
+
+#hmcol <- colorRampPalette(brewer.pal(9, "GnBu"))(100)
+pheatmap(sample_df,
+         color = rev(hmcol),
+         annotation_col = my_sample_col,
+         annotation_row = my_sample_col,
+         fontsize_row = 5,
+         fontsize_col = 5)
+
+
+##########################################################################################################
+## Determine % of expression of a customized list of genes in both tumor and normal samples
+##########################################################################################################
+#determineMedian_GeneExp_Frequency <- function (x,y) { # x is a vector of gene names, y is a vector of median expression of colon tissues from gtex
+determineMedian_GeneExp_Frequency <- function (x) {  
+  # read the GTEX tissue median expression file
+  #gtex_exp <- read.table(file = file.path(getwd(),"GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_median_tpm.gct"),  header = T, sep = "\t")
+
+    #fData(gset)[fData(gset)$Gene.Symbol %in% x,]$ID #[,c("ID","Gene.Symbol")]
+    mat <- exprs(gset)[fData(gset)$Gene.Symbol %in% x,]
+  
+    #print(mat)
+    # average out all the probe sets in one genes and pad with zeros for not expressed genes
+    probe_IDs <- row.names(mat)
+    mat <- as.data.frame(mat)
+    #print(mat)
+    mat$row.names <- fData(gset)[fData(gset)$Gene.Symbol %in% x,]$Gene.Symbol
+    
+    df_genes_list <- as.data.frame(mat %>% group_by(row.names) %>% summarise_all(list(~median(.))))
+    #print(df_genes_list)
+    
+    row.names(df_genes_list) <- df_genes_list$row.names
+    df_genes_list <- df_genes_list[,-which(names(df_genes_list) %in% c("row.names"))]
+    
+    #print(df_genes_list)
+    #df_genes_list_norm <- t(apply(df_genes_list, 1, cal_z_score))
+    
+    groupLabel <- gsub("G1","Tumor",sml)
+    groupLabel <- gsub("G0","Normal",groupLabel)
+    
+    for (idx in 1:length(x)) { 
+       # array expression is in log2 scale, so TPM from GTEX needs to be transformed to log2
+      # minus used instead of divide, due to the log scale
+       factor <- apply(df_genes_list[x[idx],groupLabel=="Normal"],1,median) - log2(apply(gtex_exp[gtex_exp$Description==x[idx],
+                                  grepl("Colon",names(gtex_exp), ignore.case = T)],1,median))
+      # print(factor)
+      #factor <- apply(df_genes_list[x[idx],groupLabel=="Normal"],1,median)/y[idx] # the factor converting intensity to TPM for each gene
+      df_genes_list[x[idx],] <- df_genes_list[x[idx],] - factor
+      
+    }
+    #print(df_genes_list)
+    # Determine % of expression of a customized list of genes in both tumor and normal samples
+    tN <- table(df_genes_list[x[1],groupLabel=="Normal"] > log2(0.5) & df_genes_list[x[2],groupLabel=="Normal"] > log2(0.5))
+    pctN_exp.gt.0.5TPM <- ifelse("TRUE" %in% names(tN),tN[names(tN)=="TRUE"]/dim(df_genes_list[,groupLabel=="Normal"])[2],0)
+    print(paste0("The Percentage of Normal samples with both ",x[1]," and ",x[2], " expressed.greater.than.0.5TPM is: ",pctN_exp.gt.0.5TPM))
+    
+    tN <- table(df_genes_list[x[1],groupLabel=="Normal"] > log2(10) & df_genes_list[x[2],groupLabel=="Normal"] > log2(10))
+    
+    pctN_exp.gt.10TPM <- ifelse("TRUE" %in% names(tN), tN[names(tN)=="TRUE"]/dim(df_genes_list[,groupLabel=="Normal"])[2],0)
+    print(paste0("The Percentage of Normal samples with both ",x[1]," and ",x[2], " expressed.greater.than.10TPM is: ",pctN_exp.gt.10TPM))
+
+        tN <- table(df_genes_list[x[1],groupLabel=="Normal"] > log2(20) & df_genes_list[x[2],groupLabel=="Normal"] > log2(20))
+    
+    pctN_exp.gt.20TPM <- ifelse("TRUE" %in% names(tN), tN[names(tN)=="TRUE"]/dim(df_genes_list[,groupLabel=="Normal"])[2],0)
+    print(paste0("The Percentage of Normal samples with both ",x[1]," and ",x[2], " expressed.greater.than.20TPM is: ",pctN_exp.gt.20TPM))
+
+        tN <- table(df_genes_list[x[1],groupLabel=="Normal"] > log2(50) & df_genes_list[x[2],groupLabel=="Normal"] > log2(50))
+    
+    pctN_exp.gt.50TPM <- ifelse("TRUE" %in% names(tN), tN[names(tN)=="TRUE"]/dim(df_genes_list[,groupLabel=="Normal"])[2],0)
+    print(paste0("The Percentage of Normal samples with both ",x[1]," and ",x[2], " expressed.greater.than.50TPM is: ",pctN_exp.gt.50TPM))
+###########################################################################################
+    tT <- table(df_genes_list[x[1],groupLabel=="Tumor"] > log2(0.5) & df_genes_list[x[2],groupLabel=="Tumor"] > log2(0.5))
+    pctT_exp.gt.0.5TPM <- ifelse("TRUE" %in% names(tT), tT[names(tT)=="TRUE"]/dim(df_genes_list[,groupLabel=="Tumor"])[2],0)
+    print(paste0("The Percentage of ",type," samples with both ",x[1]," and ",x[2], " expressed.greater.than.0.5TPM is: ",pctT_exp.gt.0.5TPM))
+    
+    tT <- table(df_genes_list[x[1],groupLabel=="Tumor"] > log2(10) & df_genes_list[x[2],groupLabel=="Tumor"] > log2(10))
+    pctT_exp.gt.10TPM <- ifelse("TRUE" %in% names(tT), tT[names(tT)=="TRUE"]/dim(df_genes_list[,groupLabel=="Tumor"])[2],0)
+    print(paste0("The Percentage of ",type," samples with both ",x[1]," and ",x[2], " expressed.greater.than.10TPM is: ",pctT_exp.gt.10TPM))
+    
+        tT <- table(df_genes_list[x[1],groupLabel=="Normal"] > log2(20) & df_genes_list[x[2],groupLabel=="Normal"] > log2(20))
+    
+    pctT_exp.gt.20TPM <- ifelse("TRUE" %in% names(tT), tT[names(tT)=="TRUE"]/dim(df_genes_list[,groupLabel=="Normal"])[2],0)
+    print(paste0("The Percentage of Normal samples with both ",x[1]," and ",x[2], " expressed.greater.than.20TPM is: ",pctT_exp.gt.20TPM))
+
+        tT <- table(df_genes_list[x[1],groupLabel=="Normal"] > log2(50) & df_genes_list[x[2],groupLabel=="Normal"] > log2(50))
+    
+    pctT_exp.gt.50TPM <- ifelse("TRUE" %in% names(tT), tT[names(tT)=="TRUE"]/dim(df_genes_list[,groupLabel=="Normal"])[2],0)
+    print(paste0("The Percentage of Normal samples with both ",x[1]," and ",x[2], " expressed.greater.than.50TPM is: ",pctT_exp.gt.50TPM))
+    
+########################################################################################
+    # write table all the frequencies
+    genes = paste0(x,collapse = "_")
+    write(paste(genes, pctN_exp.gt.0.5TPM, pctT_exp.gt.0.5TPM, type, sep = "\t"), file = file.path(getwd(),"grand.positive.freq.result.w.cutoff_0.5TPM.txt"), append = T)
+    write(paste(genes, pctN_exp.gt.10TPM, pctT_exp.gt.10TPM, type, sep = "\t"), file = file.path(getwd(),"grand.positive.freq.result.w.cutoff_10TPM.txt"), append = T)
+     write(paste(genes, pctN_exp.gt.20TPM, pctT_exp.gt.20TPM, type, sep = "\t"), file = file.path(getwd(),"grand.positive.freq.result.w.cutoff_20TPM.txt"), append = T)
+    write(paste(genes, pctN_exp.gt.50TPM, pctT_exp.gt.50TPM, type, sep = "\t"), file = file.path(getwd(),"grand.positive.freq.result.w.cutoff_50TPM.txt"), append = T)
+}
+
+df_pairs <- read.table(file = file.path(getwd(),"gene_pairs_for_exp.txt"), header = F, sep = "\t", quote = "", stringsAsFactors = F)
+for(i in 1:dim(df_pairs)[1]){
+  genes_list <- c(df_pairs[i,1],df_pairs[i,2])
+  #genes_list <- c("SLC7A5", "RNF43")
+  #med_exp_gtex_colon <- c(14.4, 0.38)
+  #determineMedian_GeneExp_Frequency(genes_list, med_exp_gtex_colon)
+  sml <- ifelse(grepl("G",sml),sml, paste("G", sml, sep=""))
+  determineMedian_GeneExp_Frequency(genes_list)
+}
+
+
+
+#################################################################################################
+
+
+
+library(affycoretools)
+library(rgl)
+library(RColorBrewer)
+qual_col_pals = brewer.pal.info[brewer.pal.info$category == 'qual',]
+col_vector = unlist(mapply(brewer.pal, qual_col_pals$maxcolors, rownames(qual_col_pals)))
+
+draw_PCA_Group <- function (x,group) {
+  # subset the gset
+  data <- x[rowSums(is.na(exprs(x))) == 0, !is.na(pData(x)[,group])]
+  items <- as.factor(pData(x)[,group][!is.na(pData(x)[,group])])
+  n <- length(levels(items))
+  p <- plotPCA(data,
+          main = paste("Principal Components for", group),
+          groups = as.numeric(items),
+          groupnames = levels(items),
+          pch = rep(16,n),
+          col = sample(col_vector,n),
+          outside = TRUE
+          )
+ return(p)
+}
+
+group = "description"
+p <- draw_PCA_Group(gset, group)
+print(p)
+
+group = "characteristics_ch1.7"
+p <- draw_PCA_Group(gset, group)
+print(p)
+
+group = "group stage:ch1"
+p <- draw_PCA_Group(gset, group)
+print(p)
+
+group = "anatomic location:ch1"
+p <- draw_PCA_Group(gset, group)
+print(p)
+
+group = "microsattelite instability:ch1"
+p <- draw_PCA_Group(gset, group)
+print(p)
+
+
+# Define a function to plot expression of a given set of genes
+# Note: for genes with multiple probesets, the median value will be taken to represent the expression level
+
+plotGeneExpMedian <- function (x) {
+  
+    fData(gset)[fData(gset)$Gene.Symbol %in% x,]$ID #[,c("ID","Gene.Symbol")]
+    mat <- exprs(gset)[fData(gset)$Gene.Symbol %in% x,]
+  
+    
+    # average out all the probe sets in one genes and pad with zeros for not expressed genes
+    probe_IDs <- row.names(mat)
+    mat <- as.data.frame(mat)
+    mat$row.names <- fData(gset)[fData(gset)$Gene.Symbol %in% x,]$Gene.Symbol
+    
+    df_genes_list <- as.data.frame(mat %>% group_by(row.names) %>% summarise_all(list(~median(.))))
+    row.names(df_genes_list) <- df_genes_list$row.names
+    df_genes_list <- df_genes_list[,-which(names(df_genes_list) %in% c("row.names"))]
+    
+    
+    df_genes_list_norm <- t(apply(df_genes_list, 1, cal_z_score))
+    
+    groupLabel <- gsub("G1","Tumor",sml)
+    groupLabel <- gsub("G0","Normal",groupLabel)
+    
+    my_sample_col <- data.frame(sample = groupLabel)
+    row.names(my_sample_col) <- colnames(df_genes_list_norm)
+    
+    my_gene_row <- data.frame(gene = rownames(df_genes_list_norm))
+    row.names(my_gene_row) <- my_gene_row$gene
+    
+    # Heatmap of Z-score normalized expression
+    pheatmap(df_genes_list_norm[order(my_gene_row),order(my_sample_col)],
+             annotation_col = my_sample_col,
+             annotation_row = my_gene_row,
+             fontsize_row = 1,
+             fontsize_col = 1,
+             cluster_rows = FALSE,
+             cluster_cols = FALSE)
+
+}
+
+plotGeneExp <- function (x) {
+  
+    fData(gset)[fData(gset)$Gene.Symbol %in% x,]$ID #[,c("ID","Gene.Symbol")]
+    df_genes_list <- exprs(gset)[fData(gset)$Gene.Symbol %in% x,]
+  
+    # average out all the probe sets in one genes and pad with zeros for not expressed genes
+    probe_IDs <- row.names(df_genes_list)
+    
+    rownames(df_genes_list) <- fData(gset)[fData(gset)$Gene.Symbol %in% x,]$Gene.Symbol
+    
+    df_genes_list_norm <- t(apply(df_genes_list, 1, cal_z_score))
+    
+    groupLabel <- gsub("G1","Tumor",sml)
+    groupLabel <- gsub("G0","Normal",groupLabel)
+    
+    my_sample_col <- data.frame(sample = groupLabel)
+    row.names(my_sample_col) <- colnames(df_genes_list_norm)
+    
+    my_gene_row <- data.frame(gene = rownames(df_genes_list_norm))
+    row.names(df_genes_list_norm) <- probe_IDs
+    row.names(my_gene_row) <- probe_IDs
+    
+    # Heatmap of Z-score normalized expression
+    pheatmap(df_genes_list_norm[order(my_gene_row),order(my_sample_col)],
+             annotation_col = my_sample_col,
+             annotation_row = my_gene_row,
+             fontsize_row = 1,
+             fontsize_col = 1,
+             cluster_rows = FALSE,
+             cluster_cols = FALSE)
+
+}
+
+
+
+#####################################################
+## Plot a customized list of genes
+#####################################################
+# list1: CDH3, col11A1, INHBA, SFTPC, CD98, GLUT-1, CD73
+genes_list <- c("CDH3", "COL11A1", "INHBA", "SFTPC", "SLC3A2", "SLC7A5", "TFRC", "SLC2A1","SLC7A8","SLC7A11","LY6D","LY6E")
+plotGeneExpMedian(genes_list)
+plotGeneExp(genes_list)
+
+# Housekeeping genes evaluation
+# The HK genes are from the paper, "https://www.future-science.com/doi/full/10.2144/04371RR03"
+# Human acidic ribosomal protein (HuPO),
+# beta-Actin (BA),
+# Cyclophylin (CYC),
+# Glyceraldehyde-3-phosphate dehydrogenase(GAPDH),
+# Phosphoglycerokinase (PGK),
+# β2-Microglobulin (B2M),
+# β-Glucuronidase (GUS),
+# Hypoxanthine phosphoribosyltransferase (HPRT),
+# Transcription factor IID TATA binding protein (TBP),
+# Transferrin receptor (TfR),
+# Elongation factor-1-α (EF-1-α),
+# Metastatic lymph node 51 (MLN51),
+# Ubiquitin conjugating enzyme (UbcH5B)
+##
+HKGenes <- c("STAT1","HUPO", "ACTB", "CYC", "GAPDH", "PGK1", "B2M", "GUS", "HPRT", "TBP", "TIR", "EF-1-a", "MLN51", "UBCH5B")
+plotGeneExpMedian(HKGenes)
+plotGeneExp(HKGenes)
+
+
+
+###############################################################################################
+## Normal expression estimation by GTEx multiple Gene Query for a list of 22 top genes
+###############################################################################################
+df_gtex_tpm <- read.table(file = "GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_median_tpm.gct", header = T, quote = "", sep = "\t")
+
+selected_top22 <- c("RNF43","CDH3","GABBR1","MET","DPEP1","SLCO4A1","SLC7A5","TDGF1","LGR5","LY6G6D","MMP14","PTK7","NOTCH3","CDH11","TACSTD2","ATP9A","LRP8","EFNA3","SLC2A3","FAP","GDPD5","TMEM132A")
+
+for (gene in selected_top22) {
+  expressedTs <- paste(names(df_gtex_tpm)[df_gtex_tpm[df_gtex_tpm$Description==gene,] > 6.5][-c(1,2)],collapse = ";")
+  write(paste(gene, expressedTs, sep = "\t"), file = "ExpressedTissues.txt",append = T)
+}
+
+pairwise <- expand.grid(as.factor(selected_top22), as.factor(selected_top22))
+pairwise <- data.frame(lapply(pairwise,as.character), stringsAsFactors = F)
+pairwise <- pairwise[pairwise$Var1 < pairwise$Var2,]
+write.table(pairwise, file = "pairwise.txt", sep = "\t", quote = FALSE)
+```
+#####
+
+
+##############################################################################
+# GLM model with candidate gene pairs to predict outcome sample type (tumor/normal)
+# evaluate the logistic regression model using ROC curve
+##############################################################################
+```{r}
+#####################################################################################################
+## Build multi-variate logistic regression to determine how well the gene pairs work to 
+## classify tumor type, under the ASSUMPTION that gene expression profile in colon normals is similar 
+## between the 2 sets of samples (GSE41258 vs GTEX DB)
+
+## 1) for each gene, mapping median intensity values to median GTEX expression TPM in colon tissue
+## 2) Convert intensity to TPM
+## 3) 10 fold cross validation & Build multi-variant logistic regression model using training data
+## 4) Analyze ROC curve from the model
+#####################################################################################################
+
+# read the GTEX tissue median expression file
+# gtex_exp <- read.table(file = file.path(getwd(),"GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_median_tpm.gct"), 
+#                        header = T,
+#                        sep = "\t")
+
+
+convertIntensity_to_TPM <- function (x) { # x is a pair of gene names as vector
+  
+    #fData(gset)[fData(gset)$Gene.Symbol %in% x,]$ID #[,c("ID","Gene.Symbol")]
+    mat <- exprs(gset)[fData(gset)$Gene.Symbol %in% x,]
+    head(mat)
+    #print(mat)
+    # average out all the probe sets in one genes and pad with zeros for not expressed genes
+    probe_IDs <- row.names(mat)
+    mat <- as.data.frame(mat)
+    #print(mat)
+    mat$row.names <- fData(gset)[fData(gset)$Gene.Symbol %in% x,]$Gene.Symbol
+    head(mat)
+    # extract median probe expression as gene expression
+    df_genes_list <- as.data.frame(mat %>% group_by(row.names) %>% summarise_all(list(~median(.))))
+    #print(df_genes_list)
+    row.names(df_genes_list) <- df_genes_list$row.names
+    df_genes_list <- df_genes_list[,-which(names(df_genes_list) %in% c("row.names"))]
+    
+    #print(df_genes_list)
+    #df_genes_list_norm <- t(apply(df_genes_list, 1, cal_z_score))
+    
+    for (idx in 1:length(x)) {
+      # the factor converting intensity to TPM for each gene, by comparing normals between GSE41258 vs GTEX in colon
+      factor <- apply(df_genes_list[x[idx],groupLabel=="Normal"],1,median) /apply(gtex_exp[gtex_exp$Description==x[idx],
+                                  grepl("Colon",names(gtex_exp), ignore.case = T)],1,median)
+
+      df_genes_list[x[idx],] <- df_genes_list[x[idx],]/factor
+      
+    }
+    return(df_genes_list)
+
+}
+
+estimate_glm_model_10xcrossvalid <- function(x) {
+  # convert normal/tumor to 0/1 respectively
+  x <- t(x)
+  x <- data.frame(x, Type = groupLabel)
+  x <- x %>% mutate(Type = ifelse(Type == "Normal",0,1))
+  
+  # 10 fold cross-validation to split the data into tain/test data
+  set.seed(123)
+  training.samples <- x$Type %>% createDataPartition(p=0.9, list = FALSE)
+  train.data <- x[training.samples,]
+  test.data <- x[-training.samples,]
+  
+  # Estimate the logistic regression model on the training data
+  logmod <- glm(reformulate(termlabels = names(x)[names(x) != "Type"], response = "Type"), data = train.data, family = binomial(link = 'logit'))
+  preds <- predict.glm(logmod, newdata = test.data, type = "response")
+  
+  ##### record performance
+  #R-squared (R2), representing the squared correlation between the observed outcome values and the predicted values by the model. The higher the adjusted R2, the better the model.
+  #Root Mean Squared Error (RMSE), which measures the average prediction error made by the model in predicting the outcome for an observation. That is, the average difference between the observed known outcome values and the values predicted by the model. The lower the RMSE, the better the model.
+  #Mean Absolute Error (MAE), an alternative to the RMSE that is less sensitive to outliers. It corresponds to the average absolute difference between observed and predicted outcomes. The lower the MAE, the better the model
+  df_performance <- data.frame( R2 = R2(preds, test.data$Type),
+                              RMSE = RMSE(preds, test.data$Type),
+                              MAE = MAE(preds, test.data$Type))
+  
+  # Draw ROC curve
+  p_roc <- roc.plot(test.data$Type, preds,
+                    #threshold = seq(0, max(preds), 0.01),
+                    #plot.thres = c(0.03, 0.05, 0.1),
+                    xlab = "1 - Specificity",
+                    ylab = "Sensitivity",
+                    main = paste0("ROC Curve of Logistic Regression Model:\n Type(", type, "/Normal) ~ ",
+                                names(x)[1], 
+                                " + " , 
+                                names(x)[2]
+                                )
+                  )
+  # p_roc <- roc.plot(test.data$Type, preds,
+  #                 threshold = seq(0, max(preds), 0.01),
+  #                 plot.thres = c(0.03, 0.05, 0.1),
+  #                 xlab = "1 - Specificity",
+  #                 ylab = "Sensitivity")
+
+  return(list("prediction"=preds, "model_performance"=df_performance, "roc.curve"=p_roc, "glm.mod"=logmod))
+}
+
+# df_pairs <- read.table(file = file.path(getwd(),"gene_pairs_for_roc.txt"), header = F, sep = "\t", quote = "", stringsAsFactors = F)
+# # plot curve for logistic regression models
+# for(i in 1:dim(df_pairs)[1]){
+#   genes_list <- c(df_pairs[i,1],df_pairs[i,2])
+#   sml <- ifelse(grepl("G",sml),sml, paste("G", sml, sep=""))
+#   groupLabel <- gsub("G1","Tumor",sml)
+#   groupLabel <- gsub("G0","Normal",groupLabel)
+# 
+#   temp <- convertIntensity_to_TPM(genes_list)
+# 
+#   # glm model
+#   result_glm.10xcrossvalid <- estimate_glm_model_10xcrossvalid(temp)
+#   #pdf(file = file.path(getwd(), paste0("ROC.curve.",paste0(genes_list, collapse = "_"),".", type,".tumor.pdf")))
+#   print(result_glm.10xcrossvalid$roc.curve)
+#   #dev.off()
+#   
+#   write.csv(tidy(result_glm.10xcrossvalid$glm.mod),file.path(getwd(),paste0("Summary.glm.",paste0(genes_list, collapse = "_"), ".",type,".tumor.csv")))
+# }
+
+
+
+#glm model using house keeping genes "EIF3A","ATF4", which is no prediction power
+#genes_list <- c("RNF43","SLC7A5")
+# genes_list <- c("EIF3A","ATF4")
+# sml <- ifelse(grepl("G",sml),sml, paste("G", sml, sep=""))
+# groupLabel <- gsub("G1","Tumor",sml)
+# groupLabel <- gsub("G0","Normal",groupLabel)
+# 
+# temp <- convertIntensity_to_TPM(genes_list)
+
+# glm model
+
+# result_glm.10xcrossvalid <- estimate_glm_model_10xcrossvalid(temp)
+# print(result_glm.10xcrossvalid$roc.curve)
+# summary(result_glm.10xcrossvalid$glm.mod)
+# write.csv(tidy(result_glm.10xcrossvalid$glm.mod),file.path(getwd(),paste0("Summary.glm.",paste0(genes_list, collapse = "_"), ".",type,".tumor.csv")))
+```
+
+#plot pairwise expression for gene pairs 
+```{r}
+library(ggpubr)
+library(Biobase)
+library(GEOquery)
+library(limma)
+library(dplyr)
+
+# Define the condition
+
+types = c("primary", "metastasis.liver", "metastasis.lung")
+idx = 1
+type = types[idx]
+#type = "metastasis.liver"
+#type = "metastasis.lung"
+
+
+# load series and platform data from GEO
+gset <- getGEO("GSE41258", GSEMatrix =TRUE, AnnotGPL=FALSE)
+if (length(gset) > 1) idx <- grep("GPL96", attr(gset, "names")) else idx <- 1
+gset <- gset[[idx]]
+
+# make proper column names to match toptable 
+fvarLabels(gset) <- make.names(fvarLabels(gset))
+
+#write.table(pData(gset),file = "GSE41258_pData.txt" , quote = FALSE, sep = "\t")
+
+# group names for all samples
+gsms_metastasis.lung <- "XXXXXXXXXXXXXXXXXXXXX1XX1X0X0XXXXXXXX0XX0XX1XXXXX0XX0XX0X0X0XX0X01X0X0X1X0XXX0X0X0XXXXXXXXX0XX1XXXX1XX0XX1XXXXXX1XXXXXXXXXXXXX1XXXXXXXXXXXXXXXXXXXX1XXXX11X1XX1X1XXXXX1XXX111XXXXXXXX0XXXXX00XXXXXXXXXXXXXXXX0XXX0XXXXXXXXXX0XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX0XXX0XX0XX0XXXXXXX0X0XXX0XXXXXXXX0XXXX0XXXX0X0XXXXX0XXX0XXXX0X0X0XXXXXXXX0XX0XXXXX0XXXXXXXX0XXX0XX0X0XXXXX0XXX0XXXXX0X0XXX00XXXXXXXXXXXXXX"
+
+gsms_metastasis.liver <- "X1111111X1111111XX1XXXXXXX0X0XXXXXXXX0XX0XXXXXXXX0XX0XX0X0X0XX0X0XX0X0XXX0XXX0X0X0XXXXXXXXX0XXXXXXXXXX0XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX1XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX11XXX1X01XXXX00XXX1X1XX11XXX1XX011X0XXXXXXXXXX0XX1XXXX1XXXXXXXXXXX1X11111XXXXX0XXX0XX0XX0XXXXXXX0X0X1X0XX1X11XX0XX1X0XXXX0X0XXXXX0XXX0XXXX0X0X0XXXXXXXX0XX0XXX1X0X1XXXXXX0XXX0XX0X0XX1XX0X1X0X1XXX0X0X1X00X1XXXXXXXXXXXX"
+
+gsms_primary <- "XXXXXXXX1XXXXXXXXXX1XXXXX101011X1X1X1011011X1X11101X01X0101011010X1010XX101X101010X1X11X111011X1111XX101XX1111X1X111X1111111XXX1X11111111X1XX1X1X11X1111XX1X1XX1X1111XX111XXX1XXX11XX0X111X00111X1XX1XXX11XXX0XX10111X1X11XX011X1XXXX1X111X1XXXXXXXXXXX11111011101101101111X11010XX10XXX1XX11011X101111010111110X110111101010111XX1X10110XXXX10XX11111101X10X10101XX110XX10XX1X1010XX100XXXXXXXXXXXXXX"
+#gsms <- "X1X1X1X1X1XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX00000"
+sml <- c()
+for (i in 1:nchar(get(paste0("gsms_",type)))) { sml[i] <- substr(get(paste0("gsms_",type)),i,i) }
+
+# eliminate samples marked as "X"
+sel <- which(sml != "X")
+sml <- sml[sel]
+gset <- gset[ ,sel]
+  
+# log2 transform
+ex <- exprs(gset)
+qx <- as.numeric(quantile(ex, c(0., 0.25, 0.5, 0.75, 0.99, 1.0), na.rm=T))
+LogC <- (qx[5] > 100) ||
+          (qx[6]-qx[1] > 50 && qx[2] > 0) ||
+          (qx[2] > 0 && qx[2] < 1 && qx[4] > 1 && qx[4] < 2)
+
+if (LogC) { ex[which(ex <= 0)] <- NaN
+  exprs(gset) <- log2(ex) }
+
+sml <- paste("G", sml, sep="") 
+
+#pheatmap
+cal_z_score <- function(x){
+  (x - mean(x)) / sd(x)
+}
+ 
+#df_scatter_all <- apply(exprs(gset), 1, cal_z_score)
+groupLabel <- gsub("G1","Tumor",sml)
+groupLabel <- gsub("G0","Normal",groupLabel)
+
+# Annotate the probe id to gene symbol
+#library("annotate")
+#library("hgu133a.db")
+#annot_df <- select(hgu133a.db, row.names(df_scatter_all),c("SYMBOL","ENTREZID", "GENENAME"))
+
+df_pairs <- read.table(file = file.path(getwd(),"gene_pairs_for_exp.txt"), header = F, sep = "\t", quote = "", stringsAsFactors = F)
+
+##############################################
+# plot specifically for RNF43 vs SLC7A5
+##############################################
+for (i in 1:nrow(df_pairs)) {
+  gene1 = df_pairs[i,1]
+  gene2 = df_pairs[i,2]
+  x=as.character(df_pairs[i,])
+  
+    fData(gset)[fData(gset)$Gene.Symbol %in% x,]$ID #[,c("ID","Gene.Symbol")]
+    mat <- exprs(gset)[fData(gset)$Gene.Symbol %in% x,]
+  
+    
+    # average out all the probe sets in one genes and pad with zeros for not expressed genes
+    probe_IDs <- row.names(mat)
+    mat <- as.data.frame(mat)
+    mat$row.names <- fData(gset)[fData(gset)$Gene.Symbol %in% x,]$Gene.Symbol
+    
+    df_genes_list <- as.data.frame(mat %>% group_by(row.names) %>% summarise_all(list(~median(.))))
+    row.names(df_genes_list) <- df_genes_list$row.names
+    df_genes_list <- df_genes_list[,-which(names(df_genes_list) %in% c("row.names"))]
+    
+    
+    df_genes_list_norm <- apply(df_genes_list, 1, cal_z_score)
+    
+
+  df_genes_list_norm <- cbind(as.data.frame(df_genes_list_norm),sample = groupLabel)
+
+  # p <- ggscatter(df_genes_list_norm, x = gene1, y = gene2,
+  #         color = "sample", palette = c("#00AFBB", "#FC4E07"), add = "reg.line", conf.int = TRUE,
+  #         cor.coef = TRUE, cor.method = "pearson",
+  #         xlab = paste0("Expression of ",gene1), ylab = paste0("Expression of ",gene2)) +
+  #   ggtitle(label = paste0("Coexpression in ",type," cancer samples ( ", gene1, "_vs_", gene2," )"))
+
+
+  p <- ggscatter(df_genes_list_norm, x = gene1, y = gene2,
+          color = "sample", palette = c("#00AFBB", "#FC4E07"), add = "reg.line", conf.int = TRUE,
+          xlab = paste0("Expression of ",gene1), ylab = paste0("Expression of ",gene2)) +
+  stat_cor(aes(color = sample), method = "pearson") +
+    ggtitle(label = paste0("Coexpression in ",type," cancer samples ( ", gene1, "_vs_", gene2," )"))
+
+  print(p)
+  ggsave(paste0(type,"_",gene1,"_vs_",gene2,".pdf"))
+}
+
+
+
+
+```
+
+
+## Including Plots
+
+You can also embed plots, for example:
+
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
